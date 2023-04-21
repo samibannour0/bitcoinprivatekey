@@ -1,0 +1,152 @@
+# Bitcoin Puzzle 64 Random
+# Made by Andrei Melek
+# https://github.com/Xh0st/puzzle64
+
+try:
+    import sys
+    import os
+    import time
+    import hashlib
+    import binascii
+    import multiprocessing
+    from multiprocessing import Process, Queue
+    from multiprocessing.pool import ThreadPool
+    import threading
+    import base58
+    import ecdsa
+    import requests
+    import random
+
+# If required imports are unavailable, we will attempt to install them!
+
+except ImportError: 
+    import subprocess
+    subprocess.check_call(["python3", '-m', 'pip', 'install', 'base58==1.0.0'])
+    subprocess.check_call(["python3", '-m', 'pip', 'install', 'ecdsa==0.13'])
+    subprocess.check_call(["python3", '-m', 'pip', 'install', 'requests==2.19.1'])
+    import base58
+    import ecdsa
+    import requests
+
+def work():
+    low  = 0x20000000000000000
+    high = 0x3ffffffffffffffff
+    return str ( hex ( random.randrange( low, high ) ) )[2:]
+    
+#Number of zeros to be added
+def generate_private_key():
+    val = work()
+    result = val.rjust(48 + len(val), '0')
+    return str(result)
+
+def private_key_to_public_key(private_key):
+    if len(private_key) != 64:
+        raise ValueError("Private key must be a 64-character hexadecimal string")
+
+    # Convert private key from hexadecimal to binary
+    private_key_bytes = binascii.unhexlify(private_key)
+
+    try:
+        # Create signing key from binary private key
+        signing_key = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
+    except ValueError:
+        raise ValueError("Invalid private key")
+
+    # Convert verifying key to binary
+    verifying_key_bytes = signing_key.verifying_key.to_string()
+
+    # Convert verifying key to hexadecimal
+    verifying_key_hex = binascii.hexlify(verifying_key_bytes).decode()
+
+    # Get X coordinate of verifying key (first half of key)
+    verifying_key_x = verifying_key_hex[:len(verifying_key_hex) // 2]
+
+    # Determine bitcoin byte (0x02 if last byte is even, 0x03 if last byte is odd)
+    last_byte = int(verifying_key_hex[-2:], 16)
+    bitcoin_byte = '02' if last_byte % 2 == 0 else '03'
+
+    # Construct public key by concatenating bitcoin byte and verifying key X coordinate
+    public_key = bitcoin_byte + verifying_key_x
+
+    return public_key
+
+
+def public_key_to_address(public_key):
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    count = 0; val = 0
+    var = hashlib.new('ripemd160')
+    var.update(hashlib.sha256(binascii.unhexlify(public_key.encode())).digest())
+    doublehash = hashlib.sha256(hashlib.sha256(binascii.unhexlify(('00' + var.hexdigest()).encode())).digest()).hexdigest()
+    address = '00' + var.hexdigest() + doublehash[0:8]
+    for char in address:
+        if (char != '0'):
+            break
+        count += 1
+    count = count // 2
+    n = int(address, 16)
+    output = []
+    while (n > 0):
+        n, remainder = divmod (n, 58)
+        output.append(alphabet[remainder])
+    while (val < count):
+        output.append(alphabet[0])
+        val += 1
+    return ''.join(output[::-1])
+
+def get_balance(address):
+    time.sleep(0.1) #This is to avoid over-using the API and keep the program running indefinately.
+    try:
+        response = requests.get("https://rest.bitcoin.com/v2/address/details/" + str(address))
+        return float(response.json()['balance']) 
+    except:
+        return -1
+
+def data_export(queue):
+    while True:
+        private_key = generate_private_key()
+        public_key = private_key_to_public_key(private_key)
+        address = public_key_to_address(public_key)
+        data = (private_key, address)
+        queue.put(data, block = False)
+
+def worker(queue):
+    while True:
+        if not queue.empty():
+            data = queue.get(block = True)
+            balance = get_balance(data[1])
+            process(data, balance)
+
+def process(data, balance):
+    private_key = data[0]
+    address = data[1]
+    if (balance == 0.00000000):
+        print("{:<34}".format(str(address)) + " : " + str(balance))
+    if (balance > 0.00000000):
+        file = open("found.txt","a")
+        file.write("address: " + str(address) + "\n" +
+                   "private key: " + str(private_key) + "\n" +
+                   "WIF private key: " + str(private_key_to_WIF(private_key)) + "\n" +
+                   "public key: " + str(private_key_to_public_key(private_key)).upper() + "\n" +
+                   "balance: " + str(balance) + "\n\n")
+        file.close()
+
+def thread(iterator):
+    processes = []
+    data = Queue()
+    data_factory = Process(target = data_export, args = (data,))
+    data_factory.daemon = True
+    processes.append(data_factory)
+    data_factory.start()
+    work = Process(target = worker, args = (data,))
+    work.daemon = True
+    processes.append(work)
+    work.start()
+    data_factory.join()
+
+if __name__ == '__main__':
+    try:
+        pool = ThreadPool(processes = multiprocessing.cpu_count()*2)
+        pool.map(thread, range(0, 1)) # Limit to single CPU thread as we can only query 300 addresses per minute
+    except:
+        pool.close()
+        exit()
